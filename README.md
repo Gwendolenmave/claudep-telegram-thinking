@@ -610,3 +610,7 @@ claude -p → stream-json → NDJSON parser
 教程、Prompt 和代码示例采用 **CC BY-NC-SA 4.0**：允许复制、修改、翻译、分享，以及交给 Codex / Claude Code 等 coding agent 使用；需要署名、禁止商业用途，并按相同许可分享衍生版本。
 
 详见 [`LICENSE.md`](./LICENSE.md) 与 [`RESPONSIBLE_USE.md`](./RESPONSIBLE_USE.md)。
+
+## Credits
+
+Built by Gwendolen with Amelia GPT and Amelia Claude.
