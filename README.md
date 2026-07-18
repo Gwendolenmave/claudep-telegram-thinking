@@ -1,4 +1,4 @@
-# Claude Code CLI → Telegram：可折叠 Thinking 教程
+# Claude Code CLI → Telegram：可折叠 Thinking 与 Little Thought 教程
 
 把 `claude -p` / Claude Code CLI 在 `stream-json` 模式下暴露的结构化 `thinking` block，与最终回复分开解析，并显示为 Telegram 中可点击展开的折叠区域。
 
@@ -12,6 +12,47 @@ Bot is thinking…
 > 本教程面向这类链路：`Telegram Bot → 自建后端 → Claude Code CLI / claude -p`。
 >
 > 它讨论的是 **Claude Code CLI 暴露的结构化 thinking 内容**，不声称获得完整、永久稳定的隐藏思维链。不同 Claude Code 版本、模型和运行模式的事件结构可能变化，因此第一步永远是能力探测。
+
+## 两种展示：Raw Thinking vs Little Thought
+
+两者都从 `stream-json` 的独立 thinking block 出发，但产品目的完全不同：
+
+| | Raw Thinking | Little Thought |
+|---|---|---|
+| 内容 | 原始 thinking 的完整或截断文本 | 只允许公开的一句微型念头 |
+| 适用场景 | 本地调试、能力验证 | 面向用户的日常界面 |
+| 默认状态 | 建议关闭，仅 owner 临时开启 | 建议作为 companion UI 的默认模式 |
+| 额外延迟 | 无 | 确定性选择器为零；模型改写器应异步 |
+| 持久化 | 不进入历史或记忆 | 可只记 hash/长度，正文仍独立持久化 |
+
+### 对比例子
+
+下面是脱敏重制的示意内容，不来自私人聊天原文。
+
+**Raw Thinking（诊断模式）**
+
+```text
+Amelia is thinking…
+┌─────────────────────────────────────────────┐
+│ Let me inspect the earlier context carefully.│
+│ The user asked ...                           │
+│ Previous messages show ...                   │
+│ I need to decide how to respond ...          │
+└─────────────────────────────────────────────┘
+
+最终回复
+```
+
+**Little Thought（推荐的日常模式）**
+
+```text
+┌─────────────────────────────────────────────┐
+│ I should answer simply and stay present.     │
+└─────────────────────────────────────────────┘
+最终回复
+```
+
+Little Thought 不是“公开一份更短的隐藏思维链”，而是从内部 processing 中生成或选择的 **public-facing micro-thought**。它必须能够安全地直接给用户阅读；拿不准时就不展示。
 
 ## 原理
 
@@ -346,19 +387,122 @@ expandable blockquote
 
 任何富文本错误都不能导致最终正文丢失或重复发送。
 
-### 6. 增加简单开关
+## 从 Raw Thinking 制作 Little Thought
 
-推荐只做三个命令：
+生产环境的目标不是“尽量展示一点 raw”，而是满足以下门禁：
+
+- 一句话，通常不超过 240–280 字符
+- 第一人称、可直接面向用户阅读
+- 不复述 system prompt、policy、memory、tool、消息编号或上下文清单
+- 不泄露路径、token、内部状态、其他用户信息或逐步推理
+- 没有安全候选时返回 `undefined`，只发送正文
+- raw thinking 不落入 transcript、history、memory、summary 或 outbox
+
+### 方案 A：确定性选择器（推荐基线，零额外模型调用）
+
+将 raw thinking 视为不可信输入：切句、拒绝内部元叙述、限制长度，只选择天然已经像公开念头的一句。**绝不能用 `raw.slice(0, n)` 作为 fallback**，因为前 n 个字符往往正是上下文复盘或内部指令。
+
+下面是最小参考实现；真实项目还应按自己的语言和隐私边界补规则：
+
+```ts
+const PRIVATE_OR_META = [
+  /^[-*]\s/,
+  /\b(system|prompt|policy|safety|context|memory|token|tool|json)\b/i,
+  /\b(the user|user said|earlier messages?|previous messages?)\b/i,
+  /\bI need to (answer|respond|avoid|follow|check)\b/i,
+  /\[[0-9, -]+\]/,
+];
+
+export function makeLittleThought(
+  rawThinking: string,
+  maxChars = 280,
+): string | undefined {
+  const candidates = rawThinking
+    .replace(/\r/g, "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return candidates.find((sentence) =>
+    sentence.length >= 12 &&
+    sentence.length <= maxChars &&
+    /\b(I|I'm|I'll|me|my)\b/i.test(sentence) &&
+    !PRIVATE_OR_META.some((pattern) => pattern.test(sentence))
+  );
+}
+```
+
+这个函数的失败结果是“不展示 Little Thought”，不是退回 raw thinking。规则是隐私门，不是安全证明；上线前仍需用真实但脱敏的 adversarial fixtures 做测试。
+
+### 方案 B：模型改写器（可选，优先异步）
+
+如果希望把复杂 processing 改写成更自然的一句，可以调用一个独立的小模型，但不要让它阻塞正文：
 
 ```text
-/think auto
+正文先正常发送
+→ bounded/redacted input 交给 compactor
+→ 输出恰好一句 public-facing thought
+→ 再做 deterministic privacy gate
+→ 通过后异步补充；超时或失败则什么都不做
+```
+
+同步 compactor 会把模型启动和网络延迟加到每轮回复上；短 timeout 又容易导致几乎每次都进入 fallback。若产品不需要异步编辑，优先使用方案 A。
+
+### 推荐 Telegram renderer
+
+日常 Little Thought 不需要加粗标题，也不需要 expandable：只保留 Telegram 原生紫色 blockquote，并用一个必要换行紧接正文。
+
+```ts
+export function renderLittleThoughtMessage(
+  text: string,
+  littleThought?: string,
+): string {
+  if (!littleThought?.trim()) {
+    return escapeTelegramHtml(text);
+  }
+
+  return [
+    `<blockquote>${escapeTelegramHtml(littleThought)}</blockquote>`,
+    escapeTelegramHtml(text),
+  ].join("\n");
+}
+```
+
+Raw Thinking 若保留为 owner-only 诊断模式，仍可使用 `<blockquote expandable>`，并明确标注它是 raw/debug 内容。
+
+### 状态与测试
+
+推荐模式：
+
+```text
+/think raw       # owner-only，完整诊断视图
+/think compact   # Little Thought，推荐默认
+/think off       # 只显示正文
+/think status    # runner、能力、模式、持久化策略
+```
+
+至少覆盖：meta/context 清单拒收、消息编号拒收、HTML 转义、无安全候选、长度上界、raw 不落盘、Little Thought 与正文只发送一次，以及 compactor timeout 不延迟或吞掉正文。
+
+### 为什么不需要编辑消息？
+
+确定性选择器可以在第一次 Telegram `sendMessage` 前完成，因此 Little Thought 与正文一次性发送，不需要 `editMessageText`。只有选择异步模型改写方案时，才需要决定是编辑原消息、补发一条，还是直接放弃迟到的 thought。
+
+
+### 6. 增加简单开关
+
+推荐提供四个命令：
+
+```text
+/think raw
+/think compact
 /think off
 /think status
 ```
 
-- `auto`：有真实 thinking 就展示，没有就只显示正文
+- `raw`：仅 owner 临时查看完整原始 thinking
+- `compact`：展示通过门禁的 Little Thought；没有安全候选时只显示正文
 - `off`：永远只显示正文
-- `status`：显示 runner、输出格式、能力状态和当前模式
+- `status`：显示 runner、输出格式、能力状态、当前模式与 persistence policy
 
 模式应复用项目现有 settings/state 层持久化。
 
@@ -388,6 +532,9 @@ type ThinkingMetadata = {
 
 当轮 Telegram 仍可展示全文，但不必长期保存原文。
 
+
+> **隐私提醒：**公开 README 不应使用真实私人对话截图来演示 raw thinking。原始 thinking 可能复述聊天历史、记忆卡、内部策略或敏感事实；请使用人工重制、完全脱敏的 fixture。
+
 ## 最小测试清单
 
 - 只有 `result`，没有 thinking
@@ -397,10 +544,11 @@ type ThinkingMetadata = {
 - stdout / stderr 分离
 - thinking 中包含 `<`、`>`、`&`
 - 超长 thinking 被截断，正文完整
-- `/think auto`、`off`、`status`
+- `/think raw`、`compact`、`off`、`status`
+- compact 拒绝 meta/context 清单且无安全候选时不显示
 - 模式重启后保留
 - Telegram 富文本失败时正文只发送一次
-- thinking 不进入 history、memory、summary 和 embedding
+- raw thinking 不进入 history、memory、summary、embedding 或 outbox
 - 非 Claude Code provider 行为不受影响
 
 ## 可直接复制给 Codex / Claude Code 的施工 Prompt
@@ -413,9 +561,12 @@ type ThinkingMetadata = {
 
 目标效果：
 
+raw（owner-only 诊断）：
 Bot is thinking…
 [Telegram 中默认折叠，点击后展开原始 thinking]
 
+compact（日常默认）：
+[无标题的紫色 Little Thought blockquote]
 正常最终回复正文
 
 请先理解当前代码结构和真实调用链，再自主完成实现、测试和集成准备。
@@ -507,6 +658,16 @@ thinking 只包含真实 thinking。
 - thinking 超长时截断，但正文必须完整
 - 使用 parse_mode="HTML"
 
+另实现 Little Thought：
+
+- 对 raw thinking 切句并执行 deterministic privacy gate
+- 拒绝 system/prompt/policy/safety/context/memory/tool、消息编号、用户事实清单和“I need to respond”式内部元叙述
+- 只选择一句 12–280 字符、第一人称、可直接公开阅读的候选
+- 没有安全候选时只发送正文，绝不 raw.slice() 或回退展示原始 thinking
+- compact renderer 只使用普通 <blockquote>，不加粗标题
+- blockquote 后只留一个必要换行，紧接正文
+- 本阶段不增加 secondary-model 调用；若以后增加模型改写，必须异步且失败不影响正文
+
 发送降级顺序：
 
 1. expandable blockquote
@@ -520,13 +681,15 @@ thinking 只包含真实 thinking。
 
 实现：
 
-/think auto
+/think raw
+/think compact
 /think off
 /think status
 
-auto：有真实 thinking 时展示；没有时只显示正文。
+raw：仅 owner 临时查看 expandable 原始 thinking。
+compact：展示通过门禁的 Little Thought；没有安全候选时只显示正文。
 off：只显示正文。
-status：显示当前模式、Claude runner、输出格式、是否支持真实 thinking、上轮是否检测到 thinking、language policy=preserve。
+status：显示当前模式、Claude runner、输出格式、是否支持真实 thinking、上轮是否检测到 thinking、persistence policy 与 language policy。
 
 模式使用项目现有 settings/state 层持久化，重启后保留。
 
@@ -565,11 +728,12 @@ thinking 不进入：
 - stderr 隔离
 - HTML 转义
 - 超长 thinking
-- /think auto/off/status
+- /think raw/compact/off/status
+- compact meta/context 拒收、长度上界、无候选省略
 - 设置持久化
 - Telegram 四级降级
 - 正文不会重复发送
-- thinking 不进入 history/memory
+- raw thinking 不进入 history/memory/outbox
 - 非 Claude Code provider 不受影响
 
 运行完整 typecheck、build 和 test。
