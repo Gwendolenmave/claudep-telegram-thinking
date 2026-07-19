@@ -13,6 +13,10 @@ Bot is thinking…
 >
 > 它讨论的是 **Claude Code CLI 暴露的结构化 thinking 内容**，不声称获得完整、永久稳定的隐藏思维链。不同 Claude Code 版本、模型和运行模式的事件结构可能变化，因此第一步永远是能力探测。
 
+## 相关教程
+
+- [Delos Relay：让规划型 AI 与 Coding Agent 不再靠人肉复制粘贴](./guides/delos-relay.md)
+
 ## 两种展示：Raw Thinking vs Little Thought
 
 两者都从 `stream-json` 的独立 thinking block 出发，但产品目的完全不同：
